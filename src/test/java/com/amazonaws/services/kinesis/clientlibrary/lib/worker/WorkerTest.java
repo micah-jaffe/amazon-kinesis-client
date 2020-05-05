@@ -72,6 +72,7 @@ import com.amazonaws.services.kinesis.leases.impl.KinesisClientLeaseBuilder;
 import com.amazonaws.services.kinesis.leases.impl.KinesisClientLeaseManager;
 import com.amazonaws.services.kinesis.leases.impl.LeaseManager;
 import com.amazonaws.services.kinesis.leases.interfaces.LeaseSelector;
+import com.amazonaws.services.kinesis.metrics.interfaces.IMetricsScope;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.hamcrest.Condition;
@@ -158,6 +159,7 @@ public class WorkerTest {
 
     private static final String KINESIS_SHARD_ID_FORMAT = "kinesis-0-0-%d";
     private static final String CONCURRENCY_TOKEN_FORMAT = "testToken-%d";
+    private static final String WORKER_ID = "workerId";
 
     private RecordsFetcherFactory recordsFetcherFactory;
     private KinesisClientLibConfiguration config;
@@ -194,7 +196,8 @@ public class WorkerTest {
 
     @Before
     public void setup() {
-        config = spy(new KinesisClientLibConfiguration("app", null, null, null));
+        System.setProperty("sqlite4java.library.path", "src/test/resources/sqlite4java-392/");
+        config = spy(new KinesisClientLibConfiguration("app", null, null, WORKER_ID));
         recordsFetcherFactory = spy(new SimpleRecordsFetcherFactory());
         when(config.getRecordsFetcherFactory()).thenReturn(recordsFetcherFactory);
     }
@@ -429,12 +432,13 @@ public class WorkerTest {
     }
 
     @Test
-    public final void testInitializationFailureWithRetries() {
+    public final void testInitializationFailureWithRetries() throws Exception {
         String stageName = "testInitializationWorker";
         IRecordProcessorFactory recordProcessorFactory = new TestStreamletFactory(null, null);
         config = new KinesisClientLibConfiguration(stageName, null, null, null);
         int count = 0;
         when(proxy.getShardList()).thenThrow(new RuntimeException(Integer.toString(count++)));
+        when(proxy.getShardListWithFilter(any())).thenThrow(new RuntimeException(Integer.toString(count++)));
         int maxRecords = 2;
         long idleTimeInMilliseconds = 1L;
         StreamConfig streamConfig =
@@ -443,6 +447,7 @@ public class WorkerTest {
                         idleTimeInMilliseconds,
                         callProcessRecordsForEmptyRecordList, skipCheckpointValidationValue, INITIAL_POSITION_LATEST);
         when(leaseCoordinator.getLeaseManager()).thenReturn(leaseManager);
+        when(leaseManager.isLeaseTableEmpty()).thenReturn(true);
         ExecutorService execService = Executors.newSingleThreadExecutor();
         long shardPollInterval = 0L;
         Worker worker =
@@ -576,6 +581,7 @@ public class WorkerTest {
 
         final ExecutorService executorService = mock(ThreadPoolExecutor.class);
         final CWMetricsFactory cwMetricsFactory = mock(CWMetricsFactory.class);
+        when(cwMetricsFactory.createMetrics()).thenReturn(mock(IMetricsScope.class));
         // Make sure that worker thread is run before invoking shutdown.
         final CountDownLatch workerStarted = new CountDownLatch(1);
         doAnswer(new Answer<Boolean>() {

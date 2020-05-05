@@ -66,6 +66,14 @@ class PeriodicShardSyncManager {
         return new TaskResult(null);
     }
 
+    /**
+     * Runs ShardSync once, without scheduling further periodic ShardSyncs.
+     * @return TaskResult if successful, otherwise propagate nested exception
+     */
+    public synchronized TaskResult syncShardsOnce() {
+        return runShardSync();
+    }
+
     public void stop() {
         if (isRunning) {
             LOG.info(String.format("Shutting down leader decider on worker %s", workerId));
@@ -76,16 +84,19 @@ class PeriodicShardSyncManager {
         }
     }
 
-    private void runShardSync() {
+    private TaskResult runShardSync() {
+        TaskResult result = null;
         try {
             if (leaderDecider.isLeader(workerId)) {
                 LOG.debug(String.format("WorkerId %s is a leader, running the shard sync task", workerId));
-                metricsEmittingShardSyncTask.call();
+                result = metricsEmittingShardSyncTask.call();
             } else {
                 LOG.debug(String.format("WorkerId %s is not a leader, not running the shard sync task", workerId));
             }
         } catch (Throwable t) {
             LOG.error("Error during runShardSync.", t);
         }
+
+        return result == null ? new TaskResult(null) : result;
     }
 }
