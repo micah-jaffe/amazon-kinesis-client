@@ -196,7 +196,6 @@ public class WorkerTest {
 
     @Before
     public void setup() {
-        System.setProperty("sqlite4java.library.path", "src/test/resources/sqlite4java-392/");
         config = spy(new KinesisClientLibConfiguration("app", null, null, WORKER_ID));
         recordsFetcherFactory = spy(new SimpleRecordsFetcherFactory());
         when(config.getRecordsFetcherFactory()).thenReturn(recordsFetcherFactory);
@@ -437,7 +436,6 @@ public class WorkerTest {
         IRecordProcessorFactory recordProcessorFactory = new TestStreamletFactory(null, null);
         config = new KinesisClientLibConfiguration(stageName, null, null, null);
         int count = 0;
-        when(proxy.getShardList()).thenThrow(new RuntimeException(Integer.toString(count++)));
         when(proxy.getShardListWithFilter(any())).thenThrow(new RuntimeException(Integer.toString(count++)));
         int maxRecords = 2;
         long idleTimeInMilliseconds = 1L;
@@ -468,6 +466,79 @@ public class WorkerTest {
                         shardPrioritization);
         worker.run();
         Assert.assertTrue(count > 0);
+    }
+
+    @Test
+    public final void testInitializationWaitsWhenLeaseTableIsEmpty() throws Exception {
+        final String stageName = "testInitializationWorker";
+        when(leaseCoordinator.getLeaseManager()).thenReturn(leaseManager);
+        when(leaseManager.isLeaseTableEmpty()).thenReturn(true);
+
+        final int maxRecords = 2;
+        final long idleTimeInMilliseconds = 1L;
+        final StreamConfig streamConfig = new StreamConfig(proxy, maxRecords, idleTimeInMilliseconds,
+                callProcessRecordsForEmptyRecordList, skipCheckpointValidationValue, INITIAL_POSITION_LATEST);
+
+        final long shardPollInterval = 0L;
+        final Worker worker =
+                new Worker(stageName,
+                        v2RecordProcessorFactory,
+                        config,
+                        streamConfig, INITIAL_POSITION_TRIM_HORIZON,
+                        shardPollInterval,
+                        shardSyncIntervalMillis,
+                        cleanupLeasesUponShardCompletion,
+                        leaseCoordinator,
+                        leaseCoordinator,
+                        Executors.newSingleThreadExecutor(),
+                        nullMetricsFactory,
+                        taskBackoffTimeMillis,
+                        failoverTimeMillis,
+                        KinesisClientLibConfiguration.DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
+                        shardPrioritization);
+
+        final long startTime = System.currentTimeMillis();
+        worker.shouldInitiateLeaseSync();
+        final long endTime = System.currentTimeMillis();
+
+        assertTrue(endTime - startTime > Worker.MIN_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS);
+        assertTrue(endTime - startTime < Worker.MAX_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS + Worker.LEASE_TABLE_CHECK_FREQUENCY_MILLIS);
+    }
+
+    @Test
+    public final void testInitializationDoesntWaitWhenLeaseTableIsNotEmpty() throws Exception {
+        final String stageName = "testInitializationWorker";
+        when(leaseCoordinator.getLeaseManager()).thenReturn(leaseManager);
+        when(leaseManager.isLeaseTableEmpty()).thenReturn(false);
+
+        final int maxRecords = 2;
+        final long idleTimeInMilliseconds = 1L;
+        final StreamConfig streamConfig = new StreamConfig(proxy, maxRecords, idleTimeInMilliseconds,
+                callProcessRecordsForEmptyRecordList, skipCheckpointValidationValue, INITIAL_POSITION_LATEST);
+
+        final long shardPollInterval = 0L;
+        final Worker worker =
+                new Worker(stageName,
+                        v2RecordProcessorFactory,
+                        config,
+                        streamConfig, INITIAL_POSITION_TRIM_HORIZON,
+                        shardPollInterval,
+                        shardSyncIntervalMillis,
+                        cleanupLeasesUponShardCompletion,
+                        leaseCoordinator,
+                        leaseCoordinator,
+                        Executors.newSingleThreadExecutor(),
+                        nullMetricsFactory,
+                        taskBackoffTimeMillis,
+                        failoverTimeMillis,
+                        KinesisClientLibConfiguration.DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
+                        shardPrioritization);
+
+        final long startTime = System.currentTimeMillis();
+        worker.shouldInitiateLeaseSync();
+        final long endTime = System.currentTimeMillis();
+
+        assertTrue(endTime - startTime < Worker.MIN_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS);
     }
 
     /**

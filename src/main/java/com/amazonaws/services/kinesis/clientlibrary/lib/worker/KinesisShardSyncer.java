@@ -177,7 +177,7 @@ class KinesisShardSyncer implements ShardSyncer {
 
         List<Shard> shards;
         if(CollectionUtils.isNullOrEmpty(latestShards)) {
-            shards = getCompleteShardList(kinesisProxy);
+            shards = getShardListAtInitialPosition(kinesisProxy, initialPosition);
         } else {
             shards = latestShards;
         }
@@ -602,6 +602,7 @@ class KinesisShardSyncer implements ShardSyncer {
         if (!garbageLeases.isEmpty()) {
             LOG.info("Found " + garbageLeases.size() + " candidate leases for cleanup. Refreshing list of"
                     + " Kinesis shards to pick up recent/latest shards");
+            // TODO: Update to ListShardsWithFilter once lease GC is finalized
             List<Shard> currentShardList = getCompleteShardList(kinesisProxy);
             Set<String> currentKinesisShardIds = new HashSet<>();
             for (Shard shard : currentShardList) {

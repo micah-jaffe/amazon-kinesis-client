@@ -46,6 +46,7 @@ import com.amazonaws.services.kinesis.leases.impl.LeaseTaker;
 import com.amazonaws.services.kinesis.leases.interfaces.ILeaseRenewer;
 import com.amazonaws.services.kinesis.leases.interfaces.ILeaseTaker;
 import com.amazonaws.services.kinesis.leases.interfaces.LeaseSelector;
+import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -97,9 +98,9 @@ public class Worker implements Runnable {
     private static final int SHARD_SYNC_SLEEP_FOR_PERIODIC_SHARD_SYNC = 0;
     private static final int MAX_INITIALIZATION_ATTEMPTS = 20;
     private static final int PERIODIC_SHARD_SYNC_MAX_WORKERS_DEFAULT = 1; //Default for KCL.
-    private static final long LEASE_TABLE_CHECK_FREQUENCY_MILLIS =1000;//= 3 * 1000L; MJ TODO
-    private static final long MIN_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS = 0;//1 * 1000L;
-    private static final long MAX_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS = 100;//30 * 1000L;
+    static final long LEASE_TABLE_CHECK_FREQUENCY_MILLIS = 3 * 1000L;
+    static final long MIN_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS = 1 * 1000L;
+    static final long MAX_WAIT_TIME_FOR_LEASE_TABLE_CHECK_MILLIS = 30 * 1000L;
 
     private static final WorkerStateChangeListener DEFAULT_WORKER_STATE_CHANGE_LISTENER = new NoOpWorkerStateChangeListener();
     private static final LeaseCleanupValidator DEFAULT_LEASE_CLEANUP_VALIDATOR = new KinesisLeaseCleanupValidator();
@@ -417,7 +418,7 @@ public class Worker implements Runnable {
                 config.getShardPrioritizationStrategy(),
                 config.getRetryGetRecordsInSeconds(),
                 config.getMaxGetRecordsThreadPool(),
-                DEFAULT_WORKER_STATE_CHANGE_LISTENER, DEFAULT_LEASE_CLEANUP_VALIDATOR, null /* leaderDecider */);
+                DEFAULT_WORKER_STATE_CHANGE_LISTENER, DEFAULT_LEASE_CLEANUP_VALIDATOR, null, null);
 
         // If a region name was explicitly specified, use it as the region for Amazon Kinesis and Amazon DynamoDB.
         if (config.getRegionName() != null) {
@@ -478,7 +479,7 @@ public class Worker implements Runnable {
                 shardSyncIdleTimeMillis, cleanupLeasesUponShardCompletion, checkpoint, leaseCoordinator, execService,
                 metricsFactory, taskBackoffTimeMillis, failoverTimeMillis, skipShardSyncAtWorkerInitializationIfLeasesExist,
                 shardPrioritization, Optional.empty(), Optional.empty(), DEFAULT_WORKER_STATE_CHANGE_LISTENER,
-                DEFAULT_LEASE_CLEANUP_VALIDATOR, null);
+                DEFAULT_LEASE_CLEANUP_VALIDATOR, null, null);
     }
 
     /**
@@ -520,6 +521,8 @@ public class Worker implements Runnable {
      *            leaseCleanupValidator instance used to validate leases
      * @param leaderDecider
      *            leaderDecider instance used elect shard sync leaders
+     * @param periodicShardSyncManager
+     *            manages periodic shard sync tasks
      */
     // NOTE: This has package level access solely for testing
     // CHECKSTYLE:IGNORE ParameterNumber FOR NEXT 10 LINES
@@ -530,13 +533,13 @@ public class Worker implements Runnable {
             IMetricsFactory metricsFactory, long taskBackoffTimeMillis, long failoverTimeMillis,
             boolean skipShardSyncAtWorkerInitializationIfLeasesExist, ShardPrioritization shardPrioritization,
             Optional<Integer> retryGetRecordsInSeconds, Optional<Integer> maxGetRecordsThreadPool, WorkerStateChangeListener workerStateChangeListener,
-            LeaseCleanupValidator leaseCleanupValidator, LeaderDecider leaderDecider) {
+            LeaseCleanupValidator leaseCleanupValidator, LeaderDecider leaderDecider, PeriodicShardSyncManager periodicShardSyncManager) {
         this(applicationName, recordProcessorFactory, config, streamConfig, initialPositionInStream,
                 parentShardPollIntervalMillis, shardSyncIdleTimeMillis, cleanupLeasesUponShardCompletion, checkpoint,
                 leaseCoordinator, execService, metricsFactory, taskBackoffTimeMillis, failoverTimeMillis,
                 skipShardSyncAtWorkerInitializationIfLeasesExist, shardPrioritization, retryGetRecordsInSeconds,
                 maxGetRecordsThreadPool, workerStateChangeListener, new KinesisShardSyncer(leaseCleanupValidator),
-                leaderDecider);
+                leaderDecider, periodicShardSyncManager);
     }
 
     Worker(String applicationName, IRecordProcessorFactory recordProcessorFactory, KinesisClientLibConfiguration config,
@@ -546,7 +549,8 @@ public class Worker implements Runnable {
             IMetricsFactory metricsFactory, long taskBackoffTimeMillis, long failoverTimeMillis,
             boolean skipShardSyncAtWorkerInitializationIfLeasesExist, ShardPrioritization shardPrioritization,
             Optional<Integer> retryGetRecordsInSeconds, Optional<Integer> maxGetRecordsThreadPool,
-            WorkerStateChangeListener workerStateChangeListener, ShardSyncer shardSyncer, LeaderDecider leaderDecider) {
+            WorkerStateChangeListener workerStateChangeListener, ShardSyncer shardSyncer, LeaderDecider leaderDecider,
+            PeriodicShardSyncManager periodicShardSyncManager) {
         this.applicationName = applicationName;
         this.recordProcessorFactory = recordProcessorFactory;
         this.config = config;
@@ -573,8 +577,9 @@ public class Worker implements Runnable {
         workerStateChangeListener.onWorkerStateChange(WorkerStateChangeListener.WorkerState.CREATED);
         this.leaderDecider = leaderDecider;
         this.shardSyncStrategy = createShardSyncStrategy(config.getShardSyncStrategyType());
-        this.leaderElectedPeriodicShardSyncManager = createPeriodicShardSyncManager();
         LOG.info(String.format("Shard sync strategy determined as %s.", shardSyncStrategy.getStrategyType().toString()));
+        this.leaderElectedPeriodicShardSyncManager = ObjectUtils.firstNonNull(periodicShardSyncManager,
+                createPeriodicShardSyncManager());
     }
 
     private ShardSyncStrategy createShardSyncStrategy(ShardSyncStrategyType strategyType) {
@@ -687,6 +692,7 @@ public class Worker implements Runnable {
                 LOG.info("Initializing LeaseCoordinator");
                 leaseCoordinator.initialize();
 
+                // Perform initial lease sync if configs allow it, with jitter.
                 if (shouldInitiateLeaseSync()) {
                     LOG.info(config.getWorkerIdentifier() + " worker is beginning initial lease sync.");
                     TaskResult result = leaderElectedPeriodicShardSyncManager.syncShardsOnce();
@@ -731,7 +737,8 @@ public class Worker implements Runnable {
         workerStateChangeListener.onWorkerStateChange(WorkerStateChangeListener.WorkerState.STARTED);
     }
 
-    private boolean shouldInitiateLeaseSync() throws InterruptedException, DependencyException, InvalidStateException,
+    @VisibleForTesting
+    boolean shouldInitiateLeaseSync() throws InterruptedException, DependencyException, InvalidStateException,
             ProvisionedThroughputException {
 
         final ILeaseManager leaseManager = leaseCoordinator.getLeaseManager();
@@ -748,7 +755,7 @@ public class Worker implements Runnable {
         boolean shouldInitiateLeaseSync = true;
         while (System.currentTimeMillis() < waitUntil && (shouldInitiateLeaseSync = leaseManager.isLeaseTableEmpty())) {
             // Check every 3 seconds if lease table is still empty, to minimize contention between all workers
-            // bootstrapping at the same time.
+            // bootstrapping from empty lease table at the same time.
             LOG.info("Lease table is still empty. Checking again in " + LEASE_TABLE_CHECK_FREQUENCY_MILLIS + " ms.");
             Thread.sleep(LEASE_TABLE_CHECK_FREQUENCY_MILLIS);
         }
@@ -1469,7 +1476,7 @@ public class Worker implements Runnable {
                     shardPrioritization,
                     config.getRetryGetRecordsInSeconds(),
                     config.getMaxGetRecordsThreadPool(),
-                    workerStateChangeListener, shardSyncer, leaderDecider);
+                    workerStateChangeListener, shardSyncer, leaderDecider, null);
         }
 
         <R, T extends AwsClientBuilder<T, R>> R createClient(final T builder,
