@@ -58,8 +58,16 @@ class PeriodicShardSyncManager {
 
     public synchronized TaskResult start() {
         if (!isRunning) {
+            final Runnable periodicShardSyncer = () -> {
+                try {
+                    runShardSync();
+                } catch (Throwable t) {
+                    LOG.error("Error running shard sync.", t);
+                }
+            };
+
             shardSyncThreadPool
-                    .scheduleWithFixedDelay(this::runShardSync, INITIAL_DELAY, PERIODIC_SHARD_SYNC_INTERVAL_MILLIS,
+                    .scheduleWithFixedDelay(periodicShardSyncer, INITIAL_DELAY, PERIODIC_SHARD_SYNC_INTERVAL_MILLIS,
                             TimeUnit.MILLISECONDS);
             isRunning = true;
         }
@@ -68,10 +76,11 @@ class PeriodicShardSyncManager {
 
     /**
      * Runs ShardSync once, without scheduling further periodic ShardSyncs.
-     * @return TaskResult if successful, otherwise propagate nested exception
+     * @return TaskResult from shard sync
      */
     public synchronized TaskResult syncShardsOnce() {
-        return runShardSync();
+        LOG.info("Syncing shards once from worker " + workerId);
+        return metricsEmittingShardSyncTask.call();
     }
 
     public void stop() {
@@ -84,19 +93,13 @@ class PeriodicShardSyncManager {
         }
     }
 
-    private TaskResult runShardSync() {
-        TaskResult result = null;
-        try {
-            if (leaderDecider.isLeader(workerId)) {
-                LOG.debug(String.format("WorkerId %s is a leader, running the shard sync task", workerId));
-                result = metricsEmittingShardSyncTask.call();
-            } else {
-                LOG.debug(String.format("WorkerId %s is not a leader, not running the shard sync task", workerId));
-            }
-        } catch (Throwable t) {
-            LOG.error("Error during runShardSync.", t);
+    private void runShardSync() {
+        if (leaderDecider.isLeader(workerId)) {
+            LOG.debug(String.format("WorkerId %s is a leader, running the shard sync task", workerId));
+            metricsEmittingShardSyncTask.call();
+        } else {
+            LOG.debug(String.format("WorkerId %s is not a leader, not running the shard sync task", workerId));
         }
 
-        return result == null ? new TaskResult(null) : result;
     }
 }
